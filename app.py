@@ -1,49 +1,16 @@
 import streamlit as st
 import pandas as pd
-from backend import database, fetcher
-import time
-
-st.set_page_config(
-    page_title="Real-time AML Agent",
-    page_icon="🕵️",
-    layout="wide"
-)
-
-# Custom CSS for "Premium" look
-st.markdown("""
-<style>
-    .reportview-container {
-        background: #f0f2f6;
-    }
-    .main-header {
-        font-family: 'Inter', sans-serif;
-        color: #1e293b;
-    }
-    .metric-card {
-        background-color: #ffffff;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-</style>
-""", unsafe_allow_html=True)
-
+from backend import database
 # Sidebar
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2040/2040504.png", width=100) # Placeholder icon
     st.title("AML Agent Control")
     st.markdown("---")
-    if st.button("🔄 Refresh Data Now", use_container_width=True):
-        with st.status("Fetching data from sources...", expanded=True) as status:
-            fetcher.run()
-            status.update(label="Fetch complete!", state="complete", expanded=False)
-        st.success("Data refreshed successfully!")
-        time.sleep(1)
-        st.rerun()
     
     st.markdown("### Monitoring")
     st.markdown("- **Sources**: DOJ, OFAC, FATF, FINTRAC, DHS")
-    st.markdown("- **Status**: Active")
+    st.markdown("- **Status**: System Active")
+    st.info("Data updates run automatically in the background via `updater.py`.")
 
 # Main Content
 st.title("🕵️ Real-time AML Emerging Watchlist")
@@ -52,9 +19,9 @@ st.markdown("Monitoring global press releases for emerging financial crime entit
 # Initialize DB on first load (safe to call multiple times)
 database.init_db()
 
-# Fetch Data
-recent_entities = database.get_recent_entities(limit=100)
-recent_articles = database.get_recent_articles(limit=50)
+# Fetch Data (Increased limit to show historical November data)
+recent_entities = database.get_recent_entities(limit=500)
+recent_articles = database.get_recent_articles(limit=200)
 
 # Metrics
 col1, col2 = st.columns(2)

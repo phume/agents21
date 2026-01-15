@@ -1,44 +1,79 @@
 import re
 import os
+import json
 
-# Try to import Google Generative AI library
+# Try to import Google GenAI library (New SDK)
 try:
-    import google.generativeai as genai
+    from google import genai
     HAS_LLM = True
 except ImportError:
     HAS_LLM = False
 
 def extract_with_llm(text):
     """
-    Uses Google Gemini (or similar) to extract entities if an API key is available.
+    Uses Google GenAI SDK to extract entities.
     """
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    # Try to get key from file first (User provided)
+    key_path = r"c:\Users\phume\Downloads\agent_S21\gemini_api.txt"
+    if os.path.exists(key_path):
+        with open(key_path, 'r') as f:
+            api_key = f.read().strip()
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
     if not HAS_LLM or not api_key:
         return None
     
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        client = genai.Client(api_key=api_key)
         
         prompt = f"""
-        Extract all financial crime entities, sanctioned individuals, or organizations from the text below.
-        Return ONLY a list of entities in the format: Name | Type (Person/Org/Vessel/etc)
-        Do not include headers or markdown.
+        Analyze the following text from a government press release (AML/Financial Crime context).
+        Identify any individuals, companies, or organizations that are being sanctioned, charged, prosecuted, or identified as involved in financial crimes.
+        
+        For each entity, determine a "Risk Level" and "Risk Type":
+        - Risk Level: High, Medium, Low
+        - Risk Type: Sanction, Money Laundering, Fraud, Drug Trafficking, Cybercrime, Terrorist Financing, Accomplice, Prosecuted, Settlement, etc.
+
+        Return strictly a JSON array of objects with keys: "name", "type" (Person/Org), "risk_level", "risk_type".
+        Do NOT generic government bodies (e.g. "Department of Justice", "Office of Foreign Assets Control", "District Court") unless they are the specific defendant/target.
         
         Text:
-        {text[:4000]}
+        {text[:8000]}
+        
+        JSON Response:
         """
         
-        response = model.generate_content(prompt)
-        lines = response.text.strip().split('\n')
+        # Using gemini-2.5-flash as authenticated by user test
+        response = client.models.generate_content(
+            model='gemini-2.0-flash', 
+            contents=prompt,
+        )
+        
+        # Robust JSON extraction using regex
+        json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+        else:
+            # Fallback: try to clean raw text
+            json_str = response.text.replace('```json', '').replace('```', '').strip()
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Last ditch: sometimes it returns single quotes
+            # print(f"  [DEBUG] JSON Parse Failed. Raw: {json_str[:100]}...")
+            return None
+        
+        # Flatten for the simpler app structure (Name | Type/Risk)
         entities = []
-        for line in lines:
-            if '|' in line:
-                parts = line.split('|')
-                entities.append({
-                    'name': parts[0].strip(),
-                    'type': parts[1].strip()
-                })
+        for item in data:
+            name = item.get('name')
+            risk = f"{item.get('risk_level', 'Unknown')} - {item.get('risk_type', 'General')}"
+            entities.append({
+                'name': name,
+                'type': risk
+            })
         return entities
     except Exception as e:
         print(f"LLM Extraction failed: {e}")
@@ -46,62 +81,20 @@ def extract_with_llm(text):
 
 def extract_entities(text):
     """
-    Extracts potential entities from text using simple heuristics or LLM.
-    Returns a list of dictionaries: {'name': 'Entity Name', 'type': 'Person/Org'}
+    Extracts entities using ONLY the LLM. 
+    If LLM fails or is not configured, returns empty list (or raises error if strictly required).
+    User explicitly requested NO REGEX fallback.
     """
     if not text:
         return []
     
-    # 1. Try LLM first if configured
+    # 1. Try LLM
     llm_result = extract_with_llm(text)
+    
     if llm_result:
         return llm_result
-
-    entities = []
-    seen = set()
-
-    # 2. Specialized Regex for "Entity Name (Country)" format
-    # Found in US Treasury/OFAC releases often.
-    # Ex: "Bliri S.A. de C.V. (Mexico)"
-    sanction_pattern = r'([A-Z0-9][A-Za-z0-9\.\-\s]+?)\s\((Mexico|Canada|Poland|China|Russia|Iran|Korea|Venezuela|Colombia|Ecuador|Brazil)\)'
-    matches_sanction = re.findall(sanction_pattern, text)
     
-    for name, country in matches_sanction:
-        clean_name = name.strip()
-        if clean_name not in seen:
-            seen.add(clean_name)
-            entities.append({
-                'name': clean_name,
-                'type': f'Sanctioned Entity ({country})'
-            })
-
-    # 3. Fallback to Capitalized Words Sequence (Heuristic)
-    # This regex looks for: Capitalized Word + (space + Capitalized Word)+
-    pattern = r'[A-Z][a-z]+(?:\s[A-Z][a-z]+)+'
-    matches = re.findall(pattern, text)
-    
-    # Filter list
-    ignore_list = {
-        'Press Release', 'Immediate Release', 'United States', 'Department of Justice',
-        'Washington', 'New York', 'District Court', 'Attorney General', 'Homeland Security',
-        'Treasury Department', 'Foreign Assets', 'Control', 'Recent Actions', 'January', 'February',
-        'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'
-    }
-    
-    for match in matches:
-        clean_match = match.strip()
-        if clean_match in seen:
-            continue
-            
-        # Basic filtering to reduce noise
-        if len(clean_match) < 4: continue
-        if any(ignore in clean_match for ignore in ignore_list): continue
-        if any(entity['name'] in clean_match for entity in entities): continue # Avoid duplicates if already found better match
-        
-        seen.add(clean_match)
-        entities.append({
-            'name': clean_match,
-            'type': 'Potential Entity' # Generic type
-        })
-        
-    return entities
+    # If LLM failed or returned None, do NOT fallback to regex.
+    # Return empty to avoid "shit" data on dashboard.
+    print("  [WARN] LLM extraction returned no results or failed. Skipping entity extraction.")
+    return []
